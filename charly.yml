@@ -89,7 +89,7 @@ ade-grader:
 
 eval-lane-plan:
   pipeline:
-    gates: [sequencing, zero-lock, teardown]
+    gates: [sequencing, lock_audit]
     redo: { max: 2, escalate_after: 3 }
     concurrency: { lanes: 16 }
     channels:
