@@ -11,6 +11,10 @@ defaults:
 discover:
   - path: candy
     recursive: true
+  - path: pr-beds
+    recursive: true
+  - path: eval
+
 
 eval-lane:
   candy:
@@ -93,10 +97,10 @@ eval-lane-plan:
     redo: { max: 2, escalate_after: 3 }
     concurrency: { lanes: 16 }
     channels:
-      stable: { golden: eval:check-omarchy-eval-base-inst:golden, provision: eval-lane-plan-channel-stable }
-      rc:     { golden: omarchy:check-charly-omarchy-rc-vm:golden,     provision: eval-lane-plan-channel-rc }
-      edge:   { golden: omarchy:check-charly-omarchy-edge-vm:golden,   provision: eval-lane-plan-channel-edge }
-      dev:    { golden: omarchy:check-charly-omarchy-dev-vm:golden,    provision: eval-lane-plan-channel-dev }
+      stable: { golden: check-omarchy-eval-base-inst:golden, provision: eval-lane-plan-channel-stable }
+      rc:     { golden: check-charly-omarchy-rc-vm:golden,     provision: eval-lane-plan-channel-rc }
+      edge:   { golden: check-charly-omarchy-edge-vm:golden,   provision: eval-lane-plan-channel-edge }
+      dev:    { golden: check-charly-omarchy-dev-vm:golden,    provision: eval-lane-plan-channel-dev }
     media:
       files: [cast, gif, mjpeg, mp4, png]
       min: { cast: 200, gif: 1024, mjpeg: 10240, mp4: 10240, png: 1024 }
@@ -119,9 +123,10 @@ eval-lane-plan:
         { "type": "object", "required": [pr, verdict, triage, channel, tier, posted],
           "properties": { "verdict": { "enum": [PASS, FAIL, NO_VALIDATION] } } }
       bed_template: |-
+        version: 2026.249.2125
         check-omarchy-pr-$pr-vm:
           vm:
-            from: $channel.golden
+            from: ${golden}
             disposable: true
             lifecycle: dev
             update_gate: restart-only
@@ -132,7 +137,11 @@ eval-lane-plan:
               - check: apply PR $pr via the single apply seam
                 id: pr-apply
                 context: [runtime]
-                command: 'pr-apply $pr $sha $files'
+                command: 'pr-apply $pr ${sha} ${files}'
+              - check: stamp the apply marker (the RED->GREEN probe evidence)
+                id: mark-applied
+                context: [runtime]
+                command: 'touch /var/tmp/omarchy-pr-$pr-applied'
               - check: start a terminal recording
                 id: rec-start
                 context: [runtime]
@@ -161,16 +170,31 @@ eval-lane-plan:
                 id: rec-gif
                 context: [runtime]
                 record: {method: render, record_name: pr-$pr, format: gif, artifact: /tmp/pr-$pr.gif}
+        # the RED-PROBE twin: the SAME golden WITHOUT the PR (no apply/marker/media).
+        # On the pristine golden the marker is absent -> the check FAILS -> the
+        # check run exits 2 (known-red contract, legacy driver parity). Pre-apply
+        # the bed must be RED; post-apply (marker stamped) it must be GREEN.
+        check-omarchy-pr-$pr-vm-probe:
+          vm:
+            from: ${golden}
+            disposable: true
+            lifecycle: dev
+            update_gate: restart-only
+            plan:
+              - check: the PR apply marker must be ABSENT on the pristine golden (KNOWN-RED)
+                id: pr-not-applied
+                context: [runtime]
+                command: 'test -e /var/tmp/omarchy-pr-$pr-applied'
     stages:
       - id: channel-select
         kind: probe
         verbs: [resolve_channel]
         input:
           channels:
-            stable: { golden: eval:check-omarchy-eval-base-inst:golden, provision: eval-lane-plan-channel-stable }
-            rc:     { golden: omarchy:check-charly-omarchy-rc-vm:golden,     provision: eval-lane-plan-channel-rc }
-            edge:   { golden: omarchy:check-charly-omarchy-edge-vm:golden,   provision: eval-lane-plan-channel-edge }
-            dev:    { golden: omarchy:check-charly-omarchy-dev-vm:golden,    provision: eval-lane-plan-channel-dev }
+            stable: { golden: check-omarchy-eval-base-inst:golden, provision: eval-lane-plan-channel-stable }
+            rc:     { golden: check-charly-omarchy-rc-vm:golden,     provision: eval-lane-plan-channel-rc }
+            edge:   { golden: check-charly-omarchy-edge-vm:golden,   provision: eval-lane-plan-channel-edge }
+            dev:    { golden: check-charly-omarchy-dev-vm:golden,    provision: eval-lane-plan-channel-dev }
           default: "$env.EVAL_CHANNEL"
         outputs: [channel]
       - id: triage
@@ -191,6 +215,7 @@ eval-lane-plan:
         template: "$report.bed_template"
         vars:
           pr: "$pr"
+          golden: "@channel-select.golden"
           sha: "$env.PR_HEAD_SHA"
           files: "@triage.plan-json.files"
           drive: "@triage.plan-json.drive"
