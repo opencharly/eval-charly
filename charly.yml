@@ -1,0 +1,261 @@
+version: 2026.249.2125
+repo: github.com/opencharly/eval-charly
+import:
+  - omarchy: '@github.com/opencharly/distro-omarchy:v2026.251.1654'
+  - eval:    '@github.com/opencharly/eval-omarchy:v2026.251.1547'
+defaults:
+  registry: ghcr.io/opencharly
+  tag: auto
+  platform: [linux/amd64]
+  build: [pac]
+discover:
+  - path: candy
+    recursive: true
+
+eval-lane:
+  candy:
+    version: 2026.251.0000
+    description: |
+      The omarchy PR-eval lane wiring: composes the generic pipeline engine + the
+      PR-tool plugin, declares the complete env/secret contract, and carries the ADE
+      self-checks. The pipeline itself is the eval-lane-plan kind:pipeline entity in
+      this file — every stage, prompt, template, and schema INLINE.
+    candy:
+      - '@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.251.2226'
+      - '@github.com/opencharly/plugin-review/candy/plugin-review:v2026.251.1939'
+    var:
+      EVAL_LANES: "16"
+      EVAL_CHANNEL: stable
+      EVAL_MAX_REDO: "2"
+      EVAL_REDO_ESCALATE: "3"
+      EVAL_REPO: omacom/omarchy
+    env_require:
+      - name: EVAL_LLM_BASE_URL
+        description: "LLM chat-completions base URL (the agent endpoint)"
+      - name: EVAL_LLM_MODEL
+        description: "LLM model id"
+      - name: EVAL_UMBRELLA
+        description: "Path to the opencharly umbrella checkout"
+        default: ""
+    env_accept:
+      - name: EVAL_LLM_SYSTEM_PROMPT
+        description: "Optional per-run system prompt override"
+      - name: EVAL_LLM_PROVIDER
+        description: "LLM provider name"
+      - name: EVAL_DRY_RUN
+        description: "Dry-run flag"
+      - name: EVAL_DEBUG
+        description: "Verbose run debugging"
+      - name: EVAL_CHANNEL
+        description: "Channel override (stable/rc/edge/dev)"
+      - name: EVAL_LANES
+        description: "Concurrency lanes"
+      - name: EVAL_MAX_REDO
+        description: "Redo bound"
+      - name: EVAL_PUBLISH
+        description: "approve -> the publication gate posts"
+      - name: PIPELINE_SKILLS
+        description: "Comma-separated @github candy refs for the agent skills"
+      - name: PIPELINE_CORPUS_DIR
+        description: "Marketplace corpus dir (rendered skill content)"
+      - name: BARE_PROMPT
+        description: "Inline prompt for the standalone agent surface"
+    secret_accept:
+      - name: EVAL_LLM_API_KEY
+        description: "LLM provider API key"
+        key: charly/api-key/eval-llm
+    plan:
+      - check: the pipeline executor self-tests
+        id: ade-pipeline-present
+        context: [runtime]
+        command: charly pipeline --self-test
+        exit_status: 0
+      - check: the pipeline entity validates against #PipelineInput
+        id: ade-pipeline-valid
+        context: [runtime]
+        command: charly pipeline validate eval-lane-plan
+        exit_status: 0
+
+ade-grader:
+  agent:
+    description: "The ADE in-bed grader (bare agent with the PR tools)"
+    command: [charly, pipeline, agent, --system-prompt, "${PROMPT}", --tools, pr]
+    prompt_via: argv
+    timeout: 5m
+    env:
+      PIPELINE_SKILLS: '@github.com/opencharly/distro-omarchy:v2026.251.1654'
+    credential:
+      - {src: charly/api-key/eval-llm, dst: EVAL_LLM_API_KEY}
+
+eval-lane-plan:
+  pipeline:
+    gates: [sequencing, zero-lock, teardown]
+    redo: { max: 2, escalate_after: 3 }
+    concurrency: { lanes: 16 }
+    channels:
+      stable: { golden: eval:check-omarchy-eval-base-inst:golden, provision: eval-lane-plan-channel-stable }
+      rc:     { golden: omarchy:check-charly-omarchy-rc-vm:golden,     provision: eval-lane-plan-channel-rc }
+      edge:   { golden: omarchy:check-charly-omarchy-edge-vm:golden,   provision: eval-lane-plan-channel-edge }
+      dev:    { golden: omarchy:check-charly-omarchy-dev-vm:golden,    provision: eval-lane-plan-channel-dev }
+    media:
+      files: [cast, gif, mjpeg, mp4, png]
+      min: { cast: 200, gif: 1024, mjpeg: 10240, mp4: 10240, png: 1024 }
+      dir: "media/pr-$pr-$calver"
+    report:
+      template: |-
+        # I tested omacom/omarchy#$pr
+        *Rendered by the charly PR-eval lane — every section filled; N/A with a reason.*
+        > ## EXTERNAL, NON-AUTHORITATIVE evaluation — read first
+        > This is an EXTERNAL, NON-AUTHORITATIVE evaluation performed by opencharly.ai.
+        > **Results can go STALE**: compare with the PR's current head before acting.
+        ## What was tested and how
+        **Overall:** @cold-read.verdict
+        **Head tested:** $pr — **results can go STALE**.
+        ## Recordings
+        - Terminal lane: ${media.cast}
+        - Full-screen lane: ${media.mp4} (${media.mjpeg}, ${media.png}, ${media.gif})
+        *Assisted-by: <Harness> <Provider Full Model Name> (<confidence>)*
+      frontmatter_schema: |-
+        { "type": "object", "required": [pr, verdict, triage, channel, tier, posted],
+          "properties": { "verdict": { "enum": [PASS, FAIL, NO_VALIDATION] } } }
+      bed_template: |-
+        check-omarchy-pr-$pr-vm:
+          vm:
+            from: $channel.golden
+            disposable: true
+            lifecycle: dev
+            update_gate: restart-only
+            add_candy:
+              - '@github.com/opencharly/plugin-record/candy/plugin-record:v2026.246.1624'
+              - '@github.com/opencharly/plugin-spice/candy/plugin-spice:v2026.245.1508'
+            plan:
+              - check: apply PR $pr via the single apply seam
+                id: pr-apply
+                context: [runtime]
+                command: 'pr-apply $pr $sha $files'
+              - check: start a terminal recording
+                id: rec-start
+                context: [runtime]
+                record: {method: start, record_mode: terminal, record_name: pr-$pr}
+              - check: start the SPICE display video capture
+                id: rec-spice-start
+                context: [runtime]
+                spice: {method: record, action: start, record_name: pr-$pr, fps: 5}
+              - check: drive the PR key command inside the recording
+                id: rec-drive
+                context: [runtime]
+                record: {method: run, record_name: pr-$pr, text: $drive, settle_ms: 1000}
+              - check: capture the VM display via SPICE
+                id: rec-screen-spice
+                context: [runtime]
+                spice: {method: screenshot, artifact: /tmp/pr-$pr-screen.png, artifact_min_bytes: 1000, artifact_not_uniform: true}
+              - check: stop the SPICE capture and pull the MJPEG stream
+                id: rec-spice-stop
+                context: [runtime]
+                spice: {method: record, action: stop, record_name: pr-$pr, artifact: /tmp/pr-$pr.mjpeg, artifact_min_bytes: 10000, artifact_not_uniform: true}
+              - check: stop the terminal recording and pull the .cast
+                id: rec-stop
+                context: [runtime]
+                record: {method: stop, record_name: pr-$pr, artifact: /tmp/pr-$pr.cast, artifact_min_bytes: 200}
+              - check: render the .cast to a GIF
+                id: rec-gif
+                context: [runtime]
+                record: {method: render, record_name: pr-$pr, format: gif, artifact: /tmp/pr-$pr.gif}
+    stages:
+      - id: channel-select
+        kind: probe
+        verbs: [resolve_channel]
+        input:
+          channels:
+            stable: { golden: eval:check-omarchy-eval-base-inst:golden, provision: eval-lane-plan-channel-stable }
+            rc:     { golden: omarchy:check-charly-omarchy-rc-vm:golden,     provision: eval-lane-plan-channel-rc }
+            edge:   { golden: omarchy:check-charly-omarchy-edge-vm:golden,   provision: eval-lane-plan-channel-edge }
+            dev:    { golden: omarchy:check-charly-omarchy-dev-vm:golden,    provision: eval-lane-plan-channel-dev }
+          default: "$env.EVAL_CHANNEL"
+        outputs: [channel]
+      - id: triage
+        kind: agent
+        skill:
+          - '@github.com/opencharly/distro-omarchy:v2026.251.1654'
+          - '@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.251.2226'
+        tools: [pr, resolve_channel, ledger]
+        prompt: |-
+          You are the Config Oracle for the omarchy PR-eval lane. You decide WHAT to
+          test and HOW — never DO the testing. TRIAGE (useful? new insight? testable
+          on this hardware? tier?) then PLAN: class, channel, tier, clone entity, the
+          known-red check list, the record plan, the phase budget. NEVER run a bed.
+          Output JSON: {class, channel, tier, entity, checks[{id,what,assertion,knownRed}], record, visual}.
+        outputs: [plan-json]
+      - id: bed-render
+        kind: generate
+        template: "$report.bed_template"
+        vars:
+          pr: "$pr"
+          sha: "$env.PR_HEAD_SHA"
+          files: "@triage.plan-json.files"
+          drive: "@triage.plan-json.drive"
+          channel: "@channel-select.channel"
+        out: "pr-beds/pr-$pr/charly.yml"
+        validate: charly-box-validate
+      - id: config-audit
+        kind: probe
+        verbs: [config_audit]
+        input: { bed: "pr-beds/pr-$pr/charly.yml", pr: "$pr" }
+        redo: { on_fail: bed-render }
+      - id: red-probe
+        kind: check
+        bed: check-omarchy-pr-$pr-vm-probe
+        expect_exit: "2"
+        teardown: probe
+      - id: eval
+        kind: check
+        bed: check-omarchy-pr-$pr-vm
+        expect_exit: "0"
+        teardown: true
+      - id: assemble-media
+        kind: media
+        assemble: true
+        transcode: mjpeg:mp4
+      - id: evidence-audit
+        kind: probe
+        verbs: [media_gate, lock_audit]
+        input:
+          media_gate: { dir: "media/pr-$pr-$calver", files: [cast, gif, mjpeg, mp4, png], min: {cast: 200, gif: 1024, mjpeg: 10240, mp4: 10240, png: 1024} }
+          lock_audit: { trees: ["$workdir/.check"] }
+        redo: { on_fail: [eval, assemble-media] }
+      - id: report
+        kind: agent
+        skill:
+          - '@github.com/opencharly/distro-omarchy:v2026.251.1654'
+          - '@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.251.2226'
+        tools: [pr, ledger]
+        prompt: |-
+          Render eval/pr-$pr.md from the ledger per the template: first-person What I
+          tested, the step matrices from the run summaries, the media table, the
+          EXTERNAL NON-AUTHORITATIVE disclaimer verbatim, the Assisted-by footer.
+          Do NOT post.
+      - id: cold-read
+        kind: agent
+        skill:
+          - '@github.com/opencharly/distro-omarchy:v2026.251.1654'
+          - '@github.com/opencharly/plugin-pipeline/candy/plugin-pipeline:v2026.251.2226'
+        tools: [pr, media_gate, lock_audit, evidence_audit, config_audit, ledger, read]
+        prompt: |-
+          Fresh-context validation of the evidence packet: SUBJECT (PASS/FAIL/
+          NO_VALIDATION) + PROCESS (known-red, tier compliance, claims scoped, media
+          non-empty + showing the commands, Assisted-by present). Every material
+          vision claim corroborated by a deterministic source. Map findings to
+          triggers: redo-plan / redo-run / redo-read / escalate.
+        redo:
+          triggers: { redo-plan: bed-render, redo-run: eval, redo-read: cold-read }
+      - id: render-report
+        kind: generate
+        template: "$report.template"
+        vars:
+          pr: "$pr"
+          cold_read: "@cold-read.verdict"
+        out: "eval/pr-$pr.md"
+        validate: report-frontmatter
+      - id: publish
+        kind: gate
+        condition: "$env.EVAL_PUBLISH == approve"

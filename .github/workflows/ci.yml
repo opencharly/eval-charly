@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install charly (release assets, pinned)
+        run: |
+          GH="$HOME/.local/charly"; mkdir -p "$GH/bin" "$GH/plugins"
+          gh release download v2026.251.1947 --repo opencharly/charly --pattern 'charly-linux-amd64' --pattern 'charly-plugins-linux-amd64.tar.gz' --dir "$GH" --clobber
+          mv "$GH/charly-linux-amd64" "$GH/bin/charly" && chmod +x "$GH/bin/charly"
+          tar -xzf "$GH/charly-plugins-linux-amd64.tar.gz" -C "$GH/plugins"
+          echo "$GH/bin" >> "$GITHUB_PATH"
+          echo "CHARLY_PLUGIN_DIR=$GH/plugins" >> "$GITHUB_ENV"
+          "$GH/bin/charly" version
+      - name: Config gates
+        run: |
+          charly box validate
